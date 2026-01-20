@@ -1,0 +1,41 @@
+name: daily_english_app
+description: 英语学习App - 基于Flutter开发
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  
+  # 状态管理
+  provider: ^6.1.1
+  
+  # 网络请求
+  http: ^1.6.0
+  
+  # 音频播放
+  audioplayers: ^6.5.1
+  
+  # JSON解析
+  json_annotation: ^4.8.1
+
+  path_provider: ^2.1.5
+  
+  # 本地存储
+  shared_preferences: ^2.2.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  build_runner: ^2.10.5
+  json_serializable: ^6.11.4
+
+flutter:
+  uses-material-design: true
+  
+  assets:
+    - english-vocabulary/json/

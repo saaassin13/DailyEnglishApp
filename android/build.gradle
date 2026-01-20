@@ -1,0 +1,33 @@
+buildscript {
+    ext.kotlin_version = '1.9.24' // [!code ++] // 将Kotlin版本同步更新
+    repositories {
+        google()
+        mavenCentral()
+    }
+
+    dependencies {
+        // 核心修复：将AGP升级到与Flutter 3.19+兼容的版本 // [!code ++]
+        classpath 'com.android.tools.build:gradle:8.3.2' // [!code ++]
+        // 确保Kotlin插件版本与上面定义的ext.kotlin_version一致
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
+    }
+}
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+rootProject.buildDir = '../build'
+subprojects {
+    project.buildDir = "${rootProject.buildDir}/${project.name}"
+}
+subprojects {
+    project.evaluationDependsOn(':app')
+}
+
+tasks.register("clean", Delete) {
+    delete rootProject.buildDir
+}
