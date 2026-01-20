@@ -124,3 +124,9 @@ cd ~/soft/android-studio/bin
 等待下载和安装完成（可能需要一些时间）
 
 ```
+
+
+## 打包
+flutter build apk
+或者 Build → Flutter菜单下，点击 Build APK 选项，等待编译完成。
+项目根目录/build/app/outputs/flutter-apk/app-release.apk
