@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:sqflite/sqflite.dart';
+import '../db/app_database.dart';
 
 class SettingsService extends ChangeNotifier {
   static const String _keyDailyReviewCount = 'daily_review_count';
@@ -17,7 +18,6 @@ class SettingsService extends ChangeNotifier {
   String? _currentWordbookId;
   String _username = _defaultUsername;
   bool _isLoading = true;
-  bool _isInitializing = false;
 
   int get dailyReviewCount => _dailyReviewCount;
   int get dailyNewCount => _dailyNewCount;
@@ -30,56 +30,52 @@ class SettingsService extends ChangeNotifier {
     _loadSettings();
   }
 
-  /// 初始化 SharedPreferences（带重试机制）
-  Future<SharedPreferences?> _getSharedPreferences() async {
-    if (_isInitializing) {
-      // 如果正在初始化，等待完成
-      int retries = 0;
-      while (_isInitializing && retries < 10) {
-        await Future.delayed(const Duration(milliseconds: 100));
-        retries++;
-      }
-    }
-
-    _isInitializing = true;
-    try {
-      // 重试机制：最多重试3次
-      for (int i = 0; i < 3; i++) {
-        try {
-          final prefs = await SharedPreferences.getInstance();
-          _isInitializing = false;
-          return prefs;
-        } catch (e) {
-          print('初始化 SharedPreferences 错误 (尝试 ${i + 1}/3): $e');
-          if (i < 2) {
-            await Future.delayed(Duration(milliseconds: 200 * (i + 1)));
-          }
-        }
-      }
-      _isInitializing = false;
-      return null;
-    } catch (e) {
-      print('初始化 SharedPreferences 最终错误: $e');
-      _isInitializing = false;
-      return null;
-    }
-  }
-
-  /// 加载设置
+  /// 从 SQLite 加载设置
   Future<void> _loadSettings() async {
     _isLoading = true;
     notifyListeners();
 
     try {
-      final prefs = await _getSharedPreferences();
-      if (prefs != null) {
-        _dailyReviewCount = prefs.getInt(_keyDailyReviewCount) ?? _defaultDailyReviewCount;
-        _dailyNewCount = prefs.getInt(_keyDailyNewCount) ?? _defaultDailyNewCount;
-        _currentWordbookId = prefs.getString(_keyCurrentWordbookId);
-        _username = prefs.getString(_keyUsername) ?? _defaultUsername;
-      } else {
-        // 如果 SharedPreferences 初始化失败，使用默认值
-        print('SharedPreferences 未初始化，使用默认设置');
+      final db = await AppDatabase.instance.database;
+      
+      // 加载每日复习数量
+      final reviewCountRow = await db.query(
+        'settings',
+        where: 'key = ?',
+        whereArgs: [_keyDailyReviewCount],
+      );
+      if (reviewCountRow.isNotEmpty) {
+        _dailyReviewCount = int.tryParse(reviewCountRow.first['value'] as String? ?? '') ?? _defaultDailyReviewCount;
+      }
+      
+      // 加载每日新学数量
+      final newCountRow = await db.query(
+        'settings',
+        where: 'key = ?',
+        whereArgs: [_keyDailyNewCount],
+      );
+      if (newCountRow.isNotEmpty) {
+        _dailyNewCount = int.tryParse(newCountRow.first['value'] as String? ?? '') ?? _defaultDailyNewCount;
+      }
+      
+      // 加载当前词库ID
+      final wordbookIdRow = await db.query(
+        'settings',
+        where: 'key = ?',
+        whereArgs: [_keyCurrentWordbookId],
+      );
+      if (wordbookIdRow.isNotEmpty) {
+        _currentWordbookId = wordbookIdRow.first['value'] as String?;
+      }
+      
+      // 加载用户名
+      final usernameRow = await db.query(
+        'settings',
+        where: 'key = ?',
+        whereArgs: [_keyUsername],
+      );
+      if (usernameRow.isNotEmpty) {
+        _username = usernameRow.first['value'] as String? ?? _defaultUsername;
       }
     } catch (e) {
       print('加载设置错误: $e');
@@ -97,12 +93,12 @@ class SettingsService extends ChangeNotifier {
     notifyListeners();
 
     try {
-      final prefs = await _getSharedPreferences();
-      if (prefs != null) {
-        await prefs.setInt(_keyDailyReviewCount, count);
-      } else {
-        print('SharedPreferences 未初始化，无法保存每日复习数量');
-      }
+      final db = await AppDatabase.instance.database;
+      await db.insert(
+        'settings',
+        {'key': _keyDailyReviewCount, 'value': count.toString()},
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
     } catch (e) {
       print('保存每日复习数量错误: $e');
     }
@@ -116,12 +112,12 @@ class SettingsService extends ChangeNotifier {
     notifyListeners();
 
     try {
-      final prefs = await _getSharedPreferences();
-      if (prefs != null) {
-        await prefs.setInt(_keyDailyNewCount, count);
-      } else {
-        print('SharedPreferences 未初始化，无法保存每日新学数量');
-      }
+      final db = await AppDatabase.instance.database;
+      await db.insert(
+        'settings',
+        {'key': _keyDailyNewCount, 'value': count.toString()},
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
     } catch (e) {
       print('保存每日新学数量错误: $e');
     }
@@ -138,13 +134,19 @@ class SettingsService extends ChangeNotifier {
     notifyListeners();
 
     try {
-      final prefs = await _getSharedPreferences();
-      if (prefs != null) {
-        await prefs.setInt(_keyDailyNewCount, _dailyNewCount);
-        await prefs.setInt(_keyDailyReviewCount, _dailyReviewCount);
-      } else {
-        print('SharedPreferences 未初始化，无法保存每日学习量');
-      }
+      final db = await AppDatabase.instance.database;
+      final batch = db.batch();
+      batch.insert(
+        'settings',
+        {'key': _keyDailyNewCount, 'value': _dailyNewCount.toString()},
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      batch.insert(
+        'settings',
+        {'key': _keyDailyReviewCount, 'value': _dailyReviewCount.toString()},
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      await batch.commit(noResult: true);
     } catch (e) {
       print('保存每日学习量错误: $e');
     }
@@ -156,15 +158,19 @@ class SettingsService extends ChangeNotifier {
     notifyListeners();
 
     try {
-      final prefs = await _getSharedPreferences();
-      if (prefs != null) {
-        if (wordbookId != null) {
-          await prefs.setString(_keyCurrentWordbookId, wordbookId);
-        } else {
-          await prefs.remove(_keyCurrentWordbookId);
-        }
+      final db = await AppDatabase.instance.database;
+      if (wordbookId != null) {
+        await db.insert(
+          'settings',
+          {'key': _keyCurrentWordbookId, 'value': wordbookId},
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
       } else {
-        print('SharedPreferences 未初始化，无法保存当前词库ID');
+        await db.delete(
+          'settings',
+          where: 'key = ?',
+          whereArgs: [_keyCurrentWordbookId],
+        );
       }
     } catch (e) {
       print('保存当前词库ID错误: $e');
@@ -181,12 +187,12 @@ class SettingsService extends ChangeNotifier {
     notifyListeners();
 
     try {
-      final prefs = await _getSharedPreferences();
-      if (prefs != null) {
-        await prefs.setString(_keyUsername, _username);
-      } else {
-        print('SharedPreferences 未初始化，无法保存用户名');
-      }
+      final db = await AppDatabase.instance.database;
+      await db.insert(
+        'settings',
+        {'key': _keyUsername, 'value': _username},
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
     } catch (e) {
       print('保存用户名错误: $e');
     }

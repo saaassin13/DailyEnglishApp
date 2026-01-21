@@ -1,79 +1,47 @@
 import 'package:flutter/foundation.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-import 'dart:convert';
+import 'package:sqflite/sqflite.dart';
 import '../models/study_record.dart';
+import '../db/app_database.dart';
 
 class StudyRecordService extends ChangeNotifier {
-  static const String _keyPrefix = 'study_session_';
-  static const String _wordRecordPrefix = 'word_record_'; // 单词历史记录前缀
-  static const String _checkInPrefix = 'check_in_'; // 打卡记录前缀
-  static const String _dailyCompletionPrefix = 'daily_completion_'; // 每日学习完成状态前缀（按词库）
-  static const String _globalDailyCompletionPrefix = 'global_daily_completion_'; // 全局每日学习完成状态前缀
   static const String _cachedTotalRememberedWordsKey = 'cached_total_remembered_words'; // 缓存的已记住单词总数
   static const String _cachedTotalRememberedWordsDateKey = 'cached_total_remembered_words_date'; // 缓存日期
-  SharedPreferences? _prefs;
-  bool _isInitializing = false;
   int? _cachedTotalRememberedWords; // 缓存的已记住单词总数
 
   StudyRecordService() {
-    // 在构造函数中异步初始化 SharedPreferences
-    _ensureInitialized().then((_) {
-      _loadCachedRememberedWords();
-    });
+    // 加载缓存的已记住单词总数
+    _loadCachedRememberedWords();
   }
 
   /// 加载缓存的已记住单词总数
   Future<void> _loadCachedRememberedWords() async {
     try {
-      final initialized = await _ensureInitialized();
-      if (!initialized || _prefs == null) return;
-
-      final cachedDateStr = _prefs!.getString(_cachedTotalRememberedWordsDateKey);
+      final db = await AppDatabase.instance.database;
+      
+      final cachedDateRow = await db.query(
+        'settings',
+        where: 'key = ?',
+        whereArgs: [_cachedTotalRememberedWordsDateKey],
+      );
+      
       final todayStr = _getTodayDateString();
       
       // 如果缓存日期是今天，加载缓存值
-      if (cachedDateStr == todayStr) {
-        _cachedTotalRememberedWords = _prefs!.getInt(_cachedTotalRememberedWordsKey);
-      }
-    } catch (e) {
-      print('加载缓存的已记住单词总数错误: $e');
-    }
-  }
-
-  /// 初始化 SharedPreferences
-  Future<bool> _ensureInitialized() async {
-    if (_prefs != null) return true;
-    if (_isInitializing) {
-      // 如果正在初始化，等待完成
-      int retries = 0;
-      while (_isInitializing && retries < 10) {
-        await Future.delayed(const Duration(milliseconds: 100));
-        retries++;
-      }
-      return _prefs != null;
-    }
-
-    _isInitializing = true;
-    try {
-      // 重试机制：最多重试3次
-      for (int i = 0; i < 3; i++) {
-        try {
-          _prefs = await SharedPreferences.getInstance();
-          _isInitializing = false;
-          return true;
-        } catch (e) {
-          print('初始化 SharedPreferences 错误 (尝试 ${i + 1}/3): $e');
-          if (i < 2) {
-            await Future.delayed(Duration(milliseconds: 200 * (i + 1)));
+      if (cachedDateRow.isNotEmpty) {
+        final cachedDateStr = cachedDateRow.first['value'] as String?;
+        if (cachedDateStr == todayStr) {
+          final cachedCountRow = await db.query(
+            'settings',
+            where: 'key = ?',
+            whereArgs: [_cachedTotalRememberedWordsKey],
+          );
+          if (cachedCountRow.isNotEmpty) {
+            _cachedTotalRememberedWords = int.tryParse(cachedCountRow.first['value'] as String? ?? '');
           }
         }
       }
-      _isInitializing = false;
-      return false;
     } catch (e) {
-      print('初始化 SharedPreferences 最终错误: $e');
-      _isInitializing = false;
-      return false;
+      print('加载缓存的已记住单词总数错误: $e');
     }
   }
 
@@ -83,15 +51,26 @@ class StudyRecordService extends ChangeNotifier {
     return '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
   }
 
+  /// 获取指定日期的日期字符串 (YYYY-MM-DD)
+  String _getDateString(DateTime date) {
+    return '${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
+  }
+
   /// 获取某词库某天的学习完成状态：'unlearned' | 'completed'
   /// - 默认：未设置即视为 'unlearned'
   Future<String> getDailyCompletionStatus(String wordbookId, {DateTime? date}) async {
     try {
-      final initialized = await _ensureInitialized();
-      if (!initialized || _prefs == null) return 'unlearned';
+      final db = await AppDatabase.instance.database;
       final dateStr = date == null ? _getTodayDateString() : _getDateString(date);
-      final key = '$_dailyCompletionPrefix${dateStr}_$wordbookId';
-      return _prefs!.getString(key) ?? 'unlearned';
+      
+      final rows = await db.query(
+        'daily_completion',
+        where: 'date = ? AND wordbook_id = ?',
+        whereArgs: [dateStr, wordbookId],
+      );
+      
+      if (rows.isEmpty) return 'unlearned';
+      return rows.first['status'] as String? ?? 'unlearned';
     } catch (e) {
       print('获取每日完成状态错误: $e');
       return 'unlearned';
@@ -105,34 +84,40 @@ class StudyRecordService extends ChangeNotifier {
     DateTime? date,
   }) async {
     try {
-      final initialized = await _ensureInitialized();
-      if (!initialized || _prefs == null) {
-        print('SharedPreferences 未初始化，无法保存每日完成状态');
-        return;
-      }
+      final db = await AppDatabase.instance.database;
       final dateStr = date == null ? _getTodayDateString() : _getDateString(date);
-      final key = '$_dailyCompletionPrefix${dateStr}_$wordbookId';
-      await _prefs!.setString(key, status);
+      
+      await db.insert(
+        'daily_completion',
+        {
+          'date': dateStr,
+          'wordbook_id': wordbookId,
+          'status': status,
+        },
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      
       notifyListeners();
     } catch (e) {
       print('保存每日完成状态错误: $e');
     }
   }
 
-  /// 获取指定日期的日期字符串 (YYYY-MM-DD)
-  String _getDateString(DateTime date) {
-    return '${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
-  }
-
   /// 获取全局今日学习完成状态：'unlearned' | 'completed'
   /// - 默认：未设置即视为 'unlearned'
   Future<String> getGlobalDailyCompletionStatus({DateTime? date}) async {
     try {
-      final initialized = await _ensureInitialized();
-      if (!initialized || _prefs == null) return 'unlearned';
+      final db = await AppDatabase.instance.database;
       final dateStr = date == null ? _getTodayDateString() : _getDateString(date);
-      final key = '$_globalDailyCompletionPrefix$dateStr';
-      return _prefs!.getString(key) ?? 'unlearned';
+      
+      final rows = await db.query(
+        'global_daily_completion',
+        where: 'date = ?',
+        whereArgs: [dateStr],
+      );
+      
+      if (rows.isEmpty) return 'unlearned';
+      return rows.first['status'] as String? ?? 'unlearned';
     } catch (e) {
       print('获取全局每日完成状态错误: $e');
       return 'unlearned';
@@ -143,23 +128,30 @@ class StudyRecordService extends ChangeNotifier {
   /// 同时自动签到（如果状态为 'completed'）
   Future<void> setGlobalDailyCompletionStatus(String status, {DateTime? date}) async {
     try {
-      final initialized = await _ensureInitialized();
-      if (!initialized || _prefs == null) {
-        print('SharedPreferences 未初始化，无法保存全局完成状态');
-        return;
-      }
+      final db = await AppDatabase.instance.database;
       final targetDate = date ?? DateTime.now();
       final dateStr = _getDateString(targetDate);
-      final key = '$_globalDailyCompletionPrefix$dateStr';
-      await _prefs!.setString(key, status);
+      
+      await db.insert(
+        'global_daily_completion',
+        {
+          'date': dateStr,
+          'status': status,
+        },
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
       
       // 如果设置为完成，自动签到
       if (status == 'completed') {
-        final checkInDateStr = _getDateString(targetDate);
-        final checkInKey = '$_checkInPrefix$checkInDateStr';
-        final checkInTime = DateTime.now().toIso8601String();
-        await _prefs!.setString(checkInKey, checkInTime);
-        print('全局学习完成，已自动签到: $checkInDateStr');
+        await db.insert(
+          'checkins',
+          {
+            'date': dateStr,
+            'check_in_time': DateTime.now().toIso8601String(),
+          },
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+        print('全局学习完成，已自动签到: $dateStr');
       }
       
       notifyListeners();
@@ -202,35 +194,59 @@ class StudyRecordService extends ChangeNotifier {
   /// 获取今日学习会话
   Future<DailyStudySession?> getTodaySession() async {
     try {
-      // 确保 SharedPreferences 已初始化
-      final initialized = await _ensureInitialized();
-      if (!initialized || _prefs == null) {
-        print('SharedPreferences 未初始化，返回空会话');
-        final date = _getTodayDateString();
-        return DailyStudySession(
-          date: date,
-          records: [],
-          accumulatedSeconds: 0,
-        );
-      }
-
+      final db = await AppDatabase.instance.database;
       final date = _getTodayDateString();
-      final key = '$_keyPrefix$date';
-      final jsonString = _prefs!.getString(key);
-
-      if (jsonString == null) {
+      
+      // 获取会话信息
+      final sessionRows = await db.query(
+        'daily_sessions',
+        where: 'date = ?',
+        whereArgs: [date],
+      );
+      
+      // 获取该日期的所有学习记录
+      final recordRows = await db.query(
+        'study_records',
+        where: 'session_date = ?',
+        whereArgs: [date],
+        orderBy: 'study_time ASC',
+      );
+      
+      final records = recordRows.map((row) => StudyRecord(
+        word: row['word'] as String,
+        wordbookId: row['wordbook_id'] as String,
+        status: row['status'] as String,
+        studyTime: DateTime.parse(row['study_time'] as String),
+        studyCount: row['study_count'] as int,
+        nextReviewDate: row['next_review_date'] != null
+            ? DateTime.parse(row['next_review_date'] as String)
+            : null,
+        reviewCount: row['review_count'] as int,
+        intervalDays: row['interval_days'] as int,
+      )).toList();
+      
+      if (sessionRows.isEmpty) {
         return DailyStudySession(
           date: date,
-          records: [],
+          records: records,
           accumulatedSeconds: 0,
         );
       }
-
-      final json = jsonDecode(jsonString) as Map<String, dynamic>;
-      return DailyStudySession.fromJson(json);
+      
+      final sessionRow = sessionRows.first;
+      return DailyStudySession(
+        date: date,
+        startTime: sessionRow['start_time'] != null
+            ? DateTime.parse(sessionRow['start_time'] as String)
+            : null,
+        endTime: sessionRow['end_time'] != null
+            ? DateTime.parse(sessionRow['end_time'] as String)
+            : null,
+        accumulatedSeconds: sessionRow['accumulated_seconds'] as int? ?? 0,
+        records: records,
+      );
     } catch (e) {
       print('获取今日学习会话错误: $e');
-      // 如果出错，返回一个空会话而不是 null
       final date = _getTodayDateString();
       return DailyStudySession(
         date: date,
@@ -243,76 +259,72 @@ class StudyRecordService extends ChangeNotifier {
   /// 获取单词的所有历史记录（跨日期）
   Future<List<StudyRecord>> getWordHistory(String word, String wordbookId) async {
     try {
-      final initialized = await _ensureInitialized();
-      if (!initialized || _prefs == null) return [];
+      final db = await AppDatabase.instance.database;
       
-      final key = '$_wordRecordPrefix${wordbookId}_$word';
-      final jsonString = _prefs!.getString(key);
+      final rows = await db.query(
+        'study_records',
+        where: 'word = ? AND wordbook_id = ?',
+        whereArgs: [word, wordbookId],
+        orderBy: 'study_time DESC',
+        limit: 3, // 只保留最近3条记录
+      );
       
-      if (jsonString == null) return [];
-      
-      final json = jsonDecode(jsonString) as List<dynamic>;
-      return json.map((r) => StudyRecord.fromJson(r as Map<String, dynamic>)).toList();
+      return rows.map((row) => StudyRecord(
+        word: row['word'] as String,
+        wordbookId: row['wordbook_id'] as String,
+        status: row['status'] as String,
+        studyTime: DateTime.parse(row['study_time'] as String),
+        studyCount: row['study_count'] as int,
+        nextReviewDate: row['next_review_date'] != null
+            ? DateTime.parse(row['next_review_date'] as String)
+            : null,
+        reviewCount: row['review_count'] as int,
+        intervalDays: row['interval_days'] as int,
+      )).toList();
     } catch (e) {
       print('获取单词历史记录错误: $e');
       return [];
-    }
-  }
-  
-  /// 保存单词的历史记录
-  Future<void> _saveWordHistory(String word, String wordbookId, StudyRecord record) async {
-    try {
-      final initialized = await _ensureInitialized();
-      if (!initialized || _prefs == null) {
-        print('_saveWordHistory: SharedPreferences 未初始化，无法保存单词 $word 的历史记录');
-        return;
-      }
-      
-      final key = '$_wordRecordPrefix${wordbookId}_$word';
-      final history = await getWordHistory(word, wordbookId);
-      
-      print('_saveWordHistory: 单词 $word (词库: $wordbookId) 的现有历史记录数量: ${history.length}');
-      print('_saveWordHistory: 准备保存的记录 - 状态: ${record.status}, 时间: ${record.studyTime}');
-      
-      // 添加新记录
-      history.add(record);
-      
-      // 保存（只保留最近3条记录）
-      final recordsToSave = history.length > 3 
-          ? history.sublist(history.length - 3)
-          : history;
-      
-      final json = recordsToSave.map((r) => r.toJson()).toList();
-      await _prefs!.setString(key, jsonEncode(json));
-      
-      print('_saveWordHistory: 单词 $word 的历史记录已保存，共 ${recordsToSave.length} 条');
-    } catch (e) {
-      print('保存单词历史记录错误: $e');
     }
   }
 
   /// 保存学习记录（更新版本，包含复习信息）
   Future<void> saveRecord(StudyRecord record) async {
     try {
-      // 保存到今日会话
-      final session = await getTodaySession();
-      if (session != null) {
-        final updatedRecords = List<StudyRecord>.from(session.records);
-        updatedRecords.add(record);
-        
-        final updatedSession = DailyStudySession(
-          date: session.date,
-          startTime: session.startTime,
-          endTime: session.endTime,
-          accumulatedSeconds: session.accumulatedSeconds,
-          records: updatedRecords,
+      final db = await AppDatabase.instance.database;
+      final todayStr = _getTodayDateString();
+      
+      // 确保今日会话存在
+      final sessionRows = await db.query(
+        'daily_sessions',
+        where: 'date = ?',
+        whereArgs: [todayStr],
+      );
+      
+      if (sessionRows.isEmpty) {
+        await db.insert(
+          'daily_sessions',
+          {
+            'date': todayStr,
+            'accumulated_seconds': 0,
+          },
         );
-        
-        await _saveSession(updatedSession);
       }
       
-      // 保存到历史记录
-      await _saveWordHistory(record.word, record.wordbookId, record);
+      // 保存学习记录到 study_records 表
+      await db.insert(
+        'study_records',
+        {
+          'session_date': todayStr,
+          'word': record.word,
+          'wordbook_id': record.wordbookId,
+          'status': record.status,
+          'study_time': record.studyTime.toIso8601String(),
+          'study_count': record.studyCount,
+          'next_review_date': record.nextReviewDate?.toIso8601String(),
+          'review_count': record.reviewCount,
+          'interval_days': record.intervalDays,
+        },
+      );
       
       // 如果单词状态变为 remembered，清除已记住单词总数的缓存
       if (record.status == 'remembered') {
@@ -328,18 +340,34 @@ class StudyRecordService extends ChangeNotifier {
   /// 更新学习会话的开始时间
   Future<void> updateStartTime(DateTime startTime) async {
     try {
-      final session = await getTodaySession();
-      if (session == null) return;
-
-      final updatedSession = DailyStudySession(
-        date: session.date,
-        startTime: startTime,
-        endTime: null,
-        accumulatedSeconds: session.accumulatedSeconds,
-        records: session.records,
+      final db = await AppDatabase.instance.database;
+      final date = _getTodayDateString();
+      
+      // 确保会话存在
+      final sessionRows = await db.query(
+        'daily_sessions',
+        where: 'date = ?',
+        whereArgs: [date],
       );
-
-      await _saveSession(updatedSession);
+      
+      if (sessionRows.isEmpty) {
+        await db.insert(
+          'daily_sessions',
+          {
+            'date': date,
+            'start_time': startTime.toIso8601String(),
+            'accumulated_seconds': 0,
+          },
+        );
+      } else {
+        await db.update(
+          'daily_sessions',
+          {'start_time': startTime.toIso8601String()},
+          where: 'date = ?',
+          whereArgs: [date],
+        );
+      }
+      
       notifyListeners();
     } catch (e) {
       print('更新开始时间错误: $e');
@@ -349,18 +377,16 @@ class StudyRecordService extends ChangeNotifier {
   /// 更新学习会话的结束时间
   Future<void> updateEndTime(DateTime endTime) async {
     try {
-      final session = await getTodaySession();
-      if (session == null) return;
-
-      final updatedSession = DailyStudySession(
-        date: session.date,
-        startTime: session.startTime,
-        endTime: endTime,
-        accumulatedSeconds: session.accumulatedSeconds,
-        records: session.records,
+      final db = await AppDatabase.instance.database;
+      final date = _getTodayDateString();
+      
+      await db.update(
+        'daily_sessions',
+        {'end_time': endTime.toIso8601String()},
+        where: 'date = ?',
+        whereArgs: [date],
       );
-
-      await _saveSession(updatedSession);
+      
       notifyListeners();
     } catch (e) {
       print('更新结束时间错误: $e');
@@ -372,53 +398,60 @@ class StudyRecordService extends ChangeNotifier {
   /// - 退出/完成：把本次时长加入到今日累计 accumulatedSeconds，并清空 startTime/endTime
   Future<void> accumulateStudyTime(DateTime currentTime, {bool isEntering = true}) async {
     try {
-      final session = await getTodaySession();
-      if (session == null) return;
-
+      final db = await AppDatabase.instance.database;
+      final date = _getTodayDateString();
+      
+      final sessionRows = await db.query(
+        'daily_sessions',
+        where: 'date = ?',
+        whereArgs: [date],
+      );
+      
       if (isEntering) {
-        final updated = DailyStudySession(
-          date: session.date,
-          startTime: currentTime,
-          endTime: null,
-          accumulatedSeconds: session.accumulatedSeconds,
-          records: session.records,
-        );
-        await _saveSession(updated);
+        if (sessionRows.isEmpty) {
+          await db.insert(
+            'daily_sessions',
+            {
+              'date': date,
+              'start_time': currentTime.toIso8601String(),
+              'accumulated_seconds': 0,
+            },
+          );
+        } else {
+          await db.update(
+            'daily_sessions',
+            {'start_time': currentTime.toIso8601String()},
+            where: 'date = ?',
+            whereArgs: [date],
+          );
+        }
         notifyListeners();
       } else {
-        if (session.startTime == null) return;
-        final delta = currentTime.difference(session.startTime!).inSeconds;
+        if (sessionRows.isEmpty) return;
+        
+        final sessionRow = sessionRows.first;
+        final startTimeStr = sessionRow['start_time'] as String?;
+        if (startTimeStr == null) return;
+        
+        final startTime = DateTime.parse(startTimeStr);
+        final delta = currentTime.difference(startTime).inSeconds;
         final safeDelta = delta < 0 ? 0 : delta;
-        final updated = DailyStudySession(
-          date: session.date,
-          startTime: null,
-          endTime: null,
-          accumulatedSeconds: session.accumulatedSeconds + safeDelta,
-          records: session.records,
+        final currentAccumulated = sessionRow['accumulated_seconds'] as int? ?? 0;
+        
+        await db.update(
+          'daily_sessions',
+          {
+            'start_time': null,
+            'end_time': null,
+            'accumulated_seconds': currentAccumulated + safeDelta,
+          },
+          where: 'date = ?',
+          whereArgs: [date],
         );
-        await _saveSession(updated);
         notifyListeners();
       }
     } catch (e) {
       print('累计学习时长错误: $e');
-    }
-  }
-
-  /// 保存学习会话
-  Future<void> _saveSession(DailyStudySession session) async {
-    try {
-      // 确保 SharedPreferences 已初始化
-      final initialized = await _ensureInitialized();
-      if (!initialized || _prefs == null) {
-        print('SharedPreferences 未初始化，无法保存会话');
-        return;
-      }
-
-      final key = '$_keyPrefix${session.date}';
-      final jsonString = jsonEncode(session.toJson());
-      await _prefs!.setString(key, jsonString);
-    } catch (e) {
-      print('保存学习会话错误: $e');
     }
   }
 
@@ -456,28 +489,21 @@ class StudyRecordService extends ChangeNotifier {
   /// 检查最近三次状态，如果有"不熟"或"不会"则加入复习
   Future<List<String>> getReviewWords(String wordbookId, {int limit = 50}) async {
     try {
-      final initialized = await _ensureInitialized();
-      if (!initialized || _prefs == null) {
-        print('getReviewWords: SharedPreferences 未初始化');
-        return [];
-      }
+      final db = await AppDatabase.instance.database;
       
-      // 获取所有单词记录
-      final allKeys = _prefs!.getKeys()
-          .where((key) => key.startsWith('$_wordRecordPrefix${wordbookId}_'))
-          .toList();
-      
-      print('getReviewWords: 找到 ${allKeys.length} 个单词记录，词库ID: $wordbookId');
-      print('getReviewWords: 所有记录键: $allKeys');
+      // 获取该词库的所有单词（去重）
+      final wordRows = await db.rawQuery('''
+        SELECT DISTINCT word 
+        FROM study_records 
+        WHERE wordbook_id = ?
+      ''', [wordbookId]);
       
       final now = DateTime.now();
       final reviewWordsWithDate = <MapEntry<String, DateTime>>[];
       
-      for (var key in allKeys) {
-        final word = key.replaceFirst('$_wordRecordPrefix${wordbookId}_', '');
+      for (var row in wordRows) {
+        final word = row['word'] as String;
         final history = await getWordHistory(word, wordbookId);
-        
-        print('getReviewWords: 单词 $word 的历史记录数量: ${history.length}');
         
         if (history.isEmpty) continue;
         
@@ -486,14 +512,11 @@ class StudyRecordService extends ChangeNotifier {
         
         // 获取最近三次状态（最多三次）
         final recentStatuses = history.take(3).map((r) => r.status).toList();
-        print('getReviewWords: 单词 $word 的最近三次状态: $recentStatuses');
         
         // 检查最近三次状态中是否有"不熟"或"不会"
         final hasForgottenOrUnknown = recentStatuses.any(
           (status) => status == 'forgotten' || status == 'unknown'
         );
-        
-        print('getReviewWords: 单词 $word 是否有不熟/不会: $hasForgottenOrUnknown');
         
         // 如果最近三次状态中有"不熟"或"不会"，则需要复习
         if (hasForgottenOrUnknown) {
@@ -511,7 +534,6 @@ class StudyRecordService extends ChangeNotifier {
             reviewDate = now;
           }
           
-          print('getReviewWords: 单词 $word 需要复习，复习日期: $reviewDate');
           reviewWordsWithDate.add(MapEntry(word, reviewDate));
         }
       }
@@ -520,8 +542,6 @@ class StudyRecordService extends ChangeNotifier {
       reviewWordsWithDate.sort((a, b) => a.value.compareTo(b.value));
       
       final result = reviewWordsWithDate.map((e) => e.key).take(limit).toList();
-      print('getReviewWords: 最终返回 ${result.length} 个需要复习的单词: $result');
-      
       return result;
     } catch (e) {
       print('获取复习单词列表错误: $e');
@@ -532,18 +552,19 @@ class StudyRecordService extends ChangeNotifier {
   /// 获取学会的单词数量（最终状态为 remembered）
   Future<int> getLearnedWordCount(String wordbookId) async {
     try {
-      final initialized = await _ensureInitialized();
-      if (!initialized || _prefs == null) return 0;
+      final db = await AppDatabase.instance.database;
       
-      // 获取所有单词记录
-      final allKeys = _prefs!.getKeys()
-          .where((key) => key.startsWith('$_wordRecordPrefix${wordbookId}_'))
-          .toList();
+      // 获取该词库的所有单词（去重）
+      final wordRows = await db.rawQuery('''
+        SELECT DISTINCT word 
+        FROM study_records 
+        WHERE wordbook_id = ?
+      ''', [wordbookId]);
       
       int learnedCount = 0;
       
-      for (var key in allKeys) {
-        final word = key.replaceFirst('$_wordRecordPrefix${wordbookId}_', '');
+      for (var row in wordRows) {
+        final word = row['word'] as String;
         final finalStatus = await getWordFinalStatus(word, wordbookId);
         
         if (finalStatus == 'remembered') {
@@ -563,27 +584,20 @@ class StudyRecordService extends ChangeNotifier {
   /// 统计规则：如果最近3次历史记录中存在2次或以上"不熟"或"不会"，则计入"不熟"
   Future<Map<String, int>> getWordbookProgress(String wordbookId, int totalWords) async {
     try {
-      final initialized = await _ensureInitialized();
-      if (!initialized || _prefs == null) {
-        return {
-          'familiar': 0,
-          'unfamiliar': 0,
-          'unselected': totalWords,
-        };
-      }
+      final db = await AppDatabase.instance.database;
       
-      // 获取所有单词记录
-      final allKeys = _prefs!.getKeys()
-          .where((key) => key.startsWith('$_wordRecordPrefix${wordbookId}_'))
-          .toList();
+      // 获取该词库的所有单词（去重）
+      final wordRows = await db.rawQuery('''
+        SELECT DISTINCT word 
+        FROM study_records 
+        WHERE wordbook_id = ?
+      ''', [wordbookId]);
       
       int familiarCount = 0; // 熟悉（remembered）
       int unfamiliarCount = 0; // 不熟（forgotten + unknown）
-      final Set<String> studiedWords = {}; // 已学习的单词集合
       
-      for (var key in allKeys) {
-        final word = key.replaceFirst('$_wordRecordPrefix${wordbookId}_', '');
-        studiedWords.add(word.toLowerCase());
+      for (var row in wordRows) {
+        final word = row['word'] as String;
         
         // 获取单词的历史记录
         final history = await getWordHistory(word, wordbookId);
@@ -615,9 +629,6 @@ class StudyRecordService extends ChangeNotifier {
       }
       
       // 未选 = 总单词数 - 已学习的单词数
-      // 注意：这里需要知道词库中实际有多少单词，但我们已经有了totalWords参数
-      // 但是studiedWords只包含有记录的单词，可能词库中的某些单词还没有被学习过
-      // 所以未选数量 = totalWords - familiarCount - unfamiliarCount
       int unselectedCount = totalWords - familiarCount - unfamiliarCount;
       if (unselectedCount < 0) unselectedCount = 0;
       
@@ -685,34 +696,64 @@ class StudyRecordService extends ChangeNotifier {
   /// 获取指定日期的学习会话
   Future<DailyStudySession?> getSessionByDate(DateTime date) async {
     try {
-      final initialized = await _ensureInitialized();
-      if (!initialized || _prefs == null) {
-        final dateStr = _getDateString(date);
-        return DailyStudySession(
-          date: dateStr,
-          records: [],
-        );
-      }
-
+      final db = await AppDatabase.instance.database;
       final dateStr = _getDateString(date);
-      final key = '$_keyPrefix$dateStr';
-      final jsonString = _prefs!.getString(key);
-
-      if (jsonString == null) {
+      
+      // 获取会话信息
+      final sessionRows = await db.query(
+        'daily_sessions',
+        where: 'date = ?',
+        whereArgs: [dateStr],
+      );
+      
+      // 获取该日期的所有学习记录
+      final recordRows = await db.query(
+        'study_records',
+        where: 'session_date = ?',
+        whereArgs: [dateStr],
+        orderBy: 'study_time ASC',
+      );
+      
+      final records = recordRows.map((row) => StudyRecord(
+        word: row['word'] as String,
+        wordbookId: row['wordbook_id'] as String,
+        status: row['status'] as String,
+        studyTime: DateTime.parse(row['study_time'] as String),
+        studyCount: row['study_count'] as int,
+        nextReviewDate: row['next_review_date'] != null
+            ? DateTime.parse(row['next_review_date'] as String)
+            : null,
+        reviewCount: row['review_count'] as int,
+        intervalDays: row['interval_days'] as int,
+      )).toList();
+      
+      if (sessionRows.isEmpty) {
         return DailyStudySession(
           date: dateStr,
-          records: [],
+          records: records,
+          accumulatedSeconds: 0,
         );
       }
-
-      final json = jsonDecode(jsonString) as Map<String, dynamic>;
-      return DailyStudySession.fromJson(json);
+      
+      final sessionRow = sessionRows.first;
+      return DailyStudySession(
+        date: dateStr,
+        startTime: sessionRow['start_time'] != null
+            ? DateTime.parse(sessionRow['start_time'] as String)
+            : null,
+        endTime: sessionRow['end_time'] != null
+            ? DateTime.parse(sessionRow['end_time'] as String)
+            : null,
+        accumulatedSeconds: sessionRow['accumulated_seconds'] as int? ?? 0,
+        records: records,
+      );
     } catch (e) {
       print('获取指定日期学习会话错误: $e');
       final dateStr = _getDateString(date);
       return DailyStudySession(
         date: dateStr,
         records: [],
+        accumulatedSeconds: 0,
       );
     }
   }
@@ -720,13 +761,16 @@ class StudyRecordService extends ChangeNotifier {
   /// 获取指定日期是否已打卡
   Future<bool> isCheckedIn(DateTime date) async {
     try {
-      final initialized = await _ensureInitialized();
-      if (!initialized || _prefs == null) return false;
-
+      final db = await AppDatabase.instance.database;
       final dateStr = _getDateString(date);
-      final key = '$_checkInPrefix$dateStr';
-      final checkInTime = _prefs!.getString(key);
-      return checkInTime != null && checkInTime.isNotEmpty;
+      
+      final rows = await db.query(
+        'checkins',
+        where: 'date = ?',
+        whereArgs: [dateStr],
+      );
+      
+      return rows.isNotEmpty;
     } catch (e) {
       print('获取打卡状态错误: $e');
       return false;
@@ -736,13 +780,18 @@ class StudyRecordService extends ChangeNotifier {
   /// 获取指定日期的打卡时间
   Future<DateTime?> getCheckInTime(DateTime date) async {
     try {
-      final initialized = await _ensureInitialized();
-      if (!initialized || _prefs == null) return null;
-
+      final db = await AppDatabase.instance.database;
       final dateStr = _getDateString(date);
-      final key = '$_checkInPrefix$dateStr';
-      final checkInTimeStr = _prefs!.getString(key);
       
+      final rows = await db.query(
+        'checkins',
+        where: 'date = ?',
+        whereArgs: [dateStr],
+      );
+      
+      if (rows.isEmpty) return null;
+      
+      final checkInTimeStr = rows.first['check_in_time'] as String?;
       if (checkInTimeStr == null || checkInTimeStr.isEmpty) {
         return null;
       }
@@ -757,16 +806,18 @@ class StudyRecordService extends ChangeNotifier {
   /// 保存打卡记录（包含时间戳）
   Future<void> checkIn(DateTime date) async {
     try {
-      final initialized = await _ensureInitialized();
-      if (!initialized || _prefs == null) {
-        print('SharedPreferences 未初始化，无法保存打卡记录');
-        return;
-      }
-
+      final db = await AppDatabase.instance.database;
       final dateStr = _getDateString(date);
-      final key = '$_checkInPrefix$dateStr';
-      final checkInTime = DateTime.now().toIso8601String();
-      await _prefs!.setString(key, checkInTime);
+      
+      await db.insert(
+        'checkins',
+        {
+          'date': dateStr,
+          'check_in_time': DateTime.now().toIso8601String(),
+        },
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      
       notifyListeners();
     } catch (e) {
       print('保存打卡记录错误: $e');
@@ -776,27 +827,31 @@ class StudyRecordService extends ChangeNotifier {
   /// 获取指定月份的所有打卡日期
   Future<Set<DateTime>> getCheckedInDatesForMonth(DateTime month) async {
     try {
-      final initialized = await _ensureInitialized();
-      if (!initialized || _prefs == null) return {};
-
+      final db = await AppDatabase.instance.database;
+      
+      // 计算月份的开始和结束日期
+      final startDate = DateTime(month.year, month.month, 1);
+      final endDate = DateTime(month.year, month.month + 1, 0);
+      final startDateStr = _getDateString(startDate);
+      final endDateStr = _getDateString(endDate);
+      
+      final rows = await db.query(
+        'checkins',
+        where: 'date >= ? AND date <= ?',
+        whereArgs: [startDateStr, endDateStr],
+      );
+      
       final checkedInDates = <DateTime>{};
-      final allKeys = _prefs!.getKeys()
-          .where((key) => key.startsWith(_checkInPrefix))
-          .toList();
-
-      for (var key in allKeys) {
-        final dateStr = key.replaceFirst(_checkInPrefix, '');
+      for (var row in rows) {
+        final dateStr = row['date'] as String;
         try {
           final date = DateTime.parse(dateStr);
-          // 检查是否在指定月份
-          if (date.year == month.year && date.month == month.month) {
-            checkedInDates.add(DateTime(date.year, date.month, date.day));
-          }
+          checkedInDates.add(DateTime(date.year, date.month, date.day));
         } catch (e) {
           print('解析日期错误: $dateStr, $e');
         }
       }
-
+      
       return checkedInDates;
     } catch (e) {
       print('获取月份打卡日期错误: $e');
@@ -807,31 +862,36 @@ class StudyRecordService extends ChangeNotifier {
   /// 获取指定月份的所有打卡记录（包含时间）
   Future<Map<DateTime, DateTime>> getCheckedInRecordsForMonth(DateTime month) async {
     try {
-      final initialized = await _ensureInitialized();
-      if (!initialized || _prefs == null) return {};
-
+      final db = await AppDatabase.instance.database;
+      
+      // 计算月份的开始和结束日期
+      final startDate = DateTime(month.year, month.month, 1);
+      final endDate = DateTime(month.year, month.month + 1, 0);
+      final startDateStr = _getDateString(startDate);
+      final endDateStr = _getDateString(endDate);
+      
+      final rows = await db.query(
+        'checkins',
+        where: 'date >= ? AND date <= ?',
+        whereArgs: [startDateStr, endDateStr],
+      );
+      
       final checkedInRecords = <DateTime, DateTime>{};
-      final allKeys = _prefs!.getKeys()
-          .where((key) => key.startsWith(_checkInPrefix))
-          .toList();
-
-      for (var key in allKeys) {
-        final dateStr = key.replaceFirst(_checkInPrefix, '');
-        try {
-          final date = DateTime.parse(dateStr);
-          // 检查是否在指定月份
-          if (date.year == month.year && date.month == month.month) {
-            final checkInTimeStr = _prefs!.getString(key);
-            if (checkInTimeStr != null && checkInTimeStr.isNotEmpty) {
-              final checkInTime = DateTime.parse(checkInTimeStr);
-              checkedInRecords[DateTime(date.year, date.month, date.day)] = checkInTime;
-            }
+      for (var row in rows) {
+        final dateStr = row['date'] as String;
+        final checkInTimeStr = row['check_in_time'] as String?;
+        
+        if (checkInTimeStr != null && checkInTimeStr.isNotEmpty) {
+          try {
+            final date = DateTime.parse(dateStr);
+            final checkInTime = DateTime.parse(checkInTimeStr);
+            checkedInRecords[DateTime(date.year, date.month, date.day)] = checkInTime;
+          } catch (e) {
+            print('解析打卡记录错误: $dateStr, $e');
           }
-        } catch (e) {
-          print('解析打卡记录错误: $dateStr, $e');
         }
       }
-
+      
       return checkedInRecords;
     } catch (e) {
       print('获取月份打卡记录错误: $e');
@@ -843,35 +903,33 @@ class StudyRecordService extends ChangeNotifier {
   /// 返回 Map<DateTime, String>，其中 String 为 'unlearned' | 'completed'
   Future<Map<DateTime, String>> getGlobalDailyCompletionStatusForMonth(DateTime month) async {
     try {
-      final initialized = await _ensureInitialized();
-      if (!initialized || _prefs == null) return {};
-
+      final db = await AppDatabase.instance.database;
+      
+      // 计算月份的开始和结束日期
+      final startDate = DateTime(month.year, month.month, 1);
+      final endDate = DateTime(month.year, month.month + 1, 0);
+      final startDateStr = _getDateString(startDate);
+      final endDateStr = _getDateString(endDate);
+      
+      final rows = await db.query(
+        'global_daily_completion',
+        where: 'date >= ? AND date <= ?',
+        whereArgs: [startDateStr, endDateStr],
+      );
+      
       final completionStatusMap = <DateTime, String>{};
-      final allKeys = _prefs!.getKeys()
-          .where((key) => key.startsWith(_globalDailyCompletionPrefix))
-          .toList();
-
-      for (var key in allKeys) {
-        final dateStr = key.replaceFirst(_globalDailyCompletionPrefix, '');
+      for (var row in rows) {
+        final dateStr = row['date'] as String;
+        final status = row['status'] as String? ?? 'unlearned';
+        
         try {
-          // 解析日期字符串（格式：YYYY-MM-DD），只使用年月日部分
-          final dateParts = dateStr.split('-');
-          if (dateParts.length == 3) {
-            final year = int.parse(dateParts[0]);
-            final monthValue = int.parse(dateParts[1]);
-            final day = int.parse(dateParts[2]);
-            final date = DateTime(year, monthValue, day);
-            // 检查是否在指定月份
-            if (date.year == month.year && date.month == month.month) {
-              final status = _prefs!.getString(key) ?? 'unlearned';
-              completionStatusMap[DateTime(date.year, date.month, date.day)] = status;
-            }
-          }
+          final date = DateTime.parse(dateStr);
+          completionStatusMap[DateTime(date.year, date.month, date.day)] = status;
         } catch (e) {
           print('解析全局完成状态错误: $dateStr, $e');
         }
       }
-
+      
       return completionStatusMap;
     } catch (e) {
       print('获取月份全局完成状态错误: $e');
@@ -882,19 +940,19 @@ class StudyRecordService extends ChangeNotifier {
   /// 获取连续签到天数
   Future<int> getConsecutiveCheckInDays() async {
     try {
-      final initialized = await _ensureInitialized();
-      if (!initialized || _prefs == null) return 0;
-
-      final allKeys = _prefs!.getKeys()
-          .where((key) => key.startsWith(_checkInPrefix))
-          .toList();
-
-      if (allKeys.isEmpty) return 0;
-
+      final db = await AppDatabase.instance.database;
+      
+      final rows = await db.query(
+        'checkins',
+        orderBy: 'date DESC',
+      );
+      
+      if (rows.isEmpty) return 0;
+      
       // 解析所有签到日期并排序
       final checkInDates = <DateTime>[];
-      for (var key in allKeys) {
-        final dateStr = key.replaceFirst(_checkInPrefix, '');
+      for (var row in rows) {
+        final dateStr = row['date'] as String;
         try {
           final date = DateTime.parse(dateStr);
           checkInDates.add(DateTime(date.year, date.month, date.day));
@@ -902,9 +960,9 @@ class StudyRecordService extends ChangeNotifier {
           print('解析签到日期错误: $dateStr, $e');
         }
       }
-
+      
       if (checkInDates.isEmpty) return 0;
-
+      
       // 去重并排序（从新到旧）
       checkInDates.sort((a, b) => b.compareTo(a));
       final uniqueDates = <DateTime>[];
@@ -913,13 +971,13 @@ class StudyRecordService extends ChangeNotifier {
           uniqueDates.add(date);
         }
       }
-
+      
       // 计算连续签到天数
       final today = DateTime.now();
       final todayDate = DateTime(today.year, today.month, today.day);
       int consecutiveDays = 0;
       DateTime expectedDate = todayDate;
-
+      
       for (var checkInDate in uniqueDates) {
         if (checkInDate == expectedDate) {
           consecutiveDays++;
@@ -929,7 +987,7 @@ class StudyRecordService extends ChangeNotifier {
           break;
         }
       }
-
+      
       return consecutiveDays;
     } catch (e) {
       print('获取连续签到天数错误: $e');
@@ -940,23 +998,20 @@ class StudyRecordService extends ChangeNotifier {
   /// 获取累积签到天数
   Future<int> getTotalCheckInDays() async {
     try {
-      final initialized = await _ensureInitialized();
-      if (!initialized || _prefs == null) return 0;
-
-      final allKeys = _prefs!.getKeys()
-          .where((key) => key.startsWith(_checkInPrefix))
-          .toList();
-
-      // 统计有效的签到记录
+      final db = await AppDatabase.instance.database;
+      
+      final rows = await db.query('checkins');
+      
+      // 统计有效的签到记录（去重）
       final checkInDates = <String>{};
-      for (var key in allKeys) {
-        final dateStr = key.replaceFirst(_checkInPrefix, '');
-        final checkInTimeStr = _prefs!.getString(key);
+      for (var row in rows) {
+        final dateStr = row['date'] as String;
+        final checkInTimeStr = row['check_in_time'] as String?;
         if (checkInTimeStr != null && checkInTimeStr.isNotEmpty) {
           checkInDates.add(dateStr);
         }
       }
-
+      
       return checkInDates.length;
     } catch (e) {
       print('获取累积签到天数错误: $e');
@@ -967,28 +1022,17 @@ class StudyRecordService extends ChangeNotifier {
   /// 获取累积学习小时数
   Future<int> getTotalStudyHours() async {
     try {
-      final initialized = await _ensureInitialized();
-      if (!initialized || _prefs == null) return 0;
-
-      final allKeys = _prefs!.getKeys()
-          .where((key) => key.startsWith(_keyPrefix))
-          .toList();
-
+      final db = await AppDatabase.instance.database;
+      
+      final rows = await db.query('daily_sessions');
+      
       int totalSeconds = 0;
-
-      for (var key in allKeys) {
-        try {
-          final jsonString = _prefs!.getString(key);
-          if (jsonString == null || jsonString.isEmpty) continue;
-
-          final json = jsonDecode(jsonString) as Map<String, dynamic>;
-          final accumulatedSeconds = json['accumulated_seconds'] as int? ?? 0;
-          totalSeconds += accumulatedSeconds;
-        } catch (e) {
-          print('解析学习会话错误: $key, $e');
-        }
+      
+      for (var row in rows) {
+        final accumulatedSeconds = row['accumulated_seconds'] as int? ?? 0;
+        totalSeconds += accumulatedSeconds;
       }
-
+      
       // 转换为小时（向上取整）
       return (totalSeconds / 3600).ceil();
     } catch (e) {
@@ -1001,43 +1045,52 @@ class StudyRecordService extends ChangeNotifier {
   /// 缓存策略：如果缓存存在且是今天的数据，直接返回缓存；否则重新计算并更新缓存
   Future<int> getTotalRememberedWordsCount({bool forceRefresh = false}) async {
     try {
-      final initialized = await _ensureInitialized();
-      if (!initialized || _prefs == null) return 0;
-
+      final db = await AppDatabase.instance.database;
+      
       // 检查缓存
       if (!forceRefresh && _cachedTotalRememberedWords != null) {
-        final cachedDateStr = _prefs!.getString(_cachedTotalRememberedWordsDateKey);
+        final cachedDateRow = await db.query(
+          'settings',
+          where: 'key = ?',
+          whereArgs: [_cachedTotalRememberedWordsDateKey],
+        );
+        
         final todayStr = _getTodayDateString();
-        if (cachedDateStr == todayStr) {
-          return _cachedTotalRememberedWords!;
+        if (cachedDateRow.isNotEmpty) {
+          final cachedDateStr = cachedDateRow.first['value'] as String?;
+          if (cachedDateStr == todayStr) {
+            return _cachedTotalRememberedWords!;
+          }
         }
       }
-
-      // 重新计算
-      final allKeys = _prefs!.getKeys()
-          .where((key) => key.startsWith(_wordRecordPrefix))
-          .toList();
-
-      final wordbookIds = <String>{};
-      for (var key in allKeys) {
-        // 键名格式：word_record_{wordbookId}_{word}
-        final parts = key.replaceFirst(_wordRecordPrefix, '').split('_');
-        if (parts.isNotEmpty) {
-          wordbookIds.add(parts[0]);
-        }
-      }
-
+      
+      // 重新计算：获取所有词库ID
+      final wordbookRows = await db.rawQuery('''
+        SELECT DISTINCT wordbook_id 
+        FROM study_records
+      ''');
+      
+      final wordbookIds = wordbookRows.map((row) => row['wordbook_id'] as String).toSet();
+      
       int totalRemembered = 0;
       for (var wordbookId in wordbookIds) {
         final count = await getLearnedWordCount(wordbookId);
         totalRemembered += count;
       }
-
+      
       // 更新缓存
       _cachedTotalRememberedWords = totalRemembered;
-      await _prefs!.setInt(_cachedTotalRememberedWordsKey, totalRemembered);
-      await _prefs!.setString(_cachedTotalRememberedWordsDateKey, _getTodayDateString());
-
+      await db.insert(
+        'settings',
+        {'key': _cachedTotalRememberedWordsKey, 'value': totalRemembered.toString()},
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      await db.insert(
+        'settings',
+        {'key': _cachedTotalRememberedWordsDateKey, 'value': _getTodayDateString()},
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      
       return totalRemembered;
     } catch (e) {
       print('获取已记住单词总数错误: $e');
@@ -1054,61 +1107,51 @@ class StudyRecordService extends ChangeNotifier {
   /// 总天数 = 从首次学习日期到今天的天数
   Future<double> getAvgDailyStudyWords() async {
     try {
-      final initialized = await _ensureInitialized();
-      if (!initialized || _prefs == null) return 0.0;
-
-      final allKeys = _prefs!.getKeys()
-          .where((key) => key.startsWith(_keyPrefix))
-          .toList();
-
-      if (allKeys.isEmpty) return 0.0;
-
+      final db = await AppDatabase.instance.database;
+      
+      final sessionRows = await db.query(
+        'daily_sessions',
+        orderBy: 'date ASC',
+      );
+      
+      if (sessionRows.isEmpty) return 0.0;
+      
       int totalWords = 0;
       DateTime? firstStudyDate;
-
-      for (var key in allKeys) {
-        try {
-          final jsonString = _prefs!.getString(key);
-          if (jsonString == null || jsonString.isEmpty) continue;
-
-          final json = jsonDecode(jsonString) as Map<String, dynamic>;
-          final dateStr = json['date'] as String?;
-          final records = json['records'] as List<dynamic>? ?? [];
-
-          if (dateStr != null && records.isNotEmpty) {
-            // 解析日期
-            try {
-              final date = DateTime.parse(dateStr);
-              if (firstStudyDate == null || date.isBefore(firstStudyDate)) {
-                firstStudyDate = date;
-              }
-            } catch (e) {
-              print('解析日期错误: $dateStr, $e');
+      
+      for (var sessionRow in sessionRows) {
+        final dateStr = sessionRow['date'] as String;
+        
+        // 获取该日期的唯一单词数
+        final recordRows = await db.rawQuery('''
+          SELECT DISTINCT word 
+          FROM study_records 
+          WHERE session_date = ?
+        ''', [dateStr]);
+        
+        final uniqueWordCount = recordRows.length;
+        if (uniqueWordCount > 0) {
+          try {
+            final date = DateTime.parse(dateStr);
+            if (firstStudyDate == null || date.isBefore(firstStudyDate)) {
+              firstStudyDate = date;
             }
-
-            // 统计该日期的唯一单词数
-            final uniqueWords = <String>{};
-            for (var record in records) {
-              final word = record['word'] as String?;
-              if (word != null) {
-                uniqueWords.add(word);
-              }
-            }
-            totalWords += uniqueWords.length;
+          } catch (e) {
+            print('解析日期错误: $dateStr, $e');
           }
-        } catch (e) {
-          print('解析学习会话错误: $key, $e');
+          
+          totalWords += uniqueWordCount;
         }
       }
-
+      
       if (firstStudyDate == null) return 0.0;
-
+      
       // 计算总天数（从首次学习日期到今天）
       final today = DateTime.now();
       final todayDate = DateTime(today.year, today.month, today.day);
       final firstDate = DateTime(firstStudyDate.year, firstStudyDate.month, firstStudyDate.day);
       final totalDays = todayDate.difference(firstDate).inDays + 1; // +1 包含今天
-
+      
       if (totalDays <= 0) return 0.0;
       return totalWords / totalDays;
     } catch (e) {
@@ -1119,73 +1162,32 @@ class StudyRecordService extends ChangeNotifier {
 
   /// 重置词库状态（清除该词库的所有学习记录）
   /// 包括：
-  /// 1. 单词历史记录（word_record_{wordbookId}_*）
-  /// 2. 学习会话记录中该词库的记录（从 study_session_* 中移除该词库的记录）
-  /// 3. 每日完成状态（daily_completion_{date}_{wordbookId}）
-  /// 4. 清除已记住单词总数的缓存
+  /// 1. 学习记录（study_records 表中该词库的记录）
+  /// 2. 每日完成状态（daily_completion 表中该词库的记录）
+  /// 3. 清除已记住单词总数的缓存
   Future<void> resetWordbook(String wordbookId) async {
     try {
-      final initialized = await _ensureInitialized();
-      if (!initialized || _prefs == null) {
-        print('SharedPreferences 未初始化，无法重置词库');
-        return;
-      }
-
-      // 1. 清除单词历史记录
-      final wordRecordKeys = _prefs!.getKeys()
-          .where((key) => key.startsWith('$_wordRecordPrefix${wordbookId}_'))
-          .toList();
+      final db = await AppDatabase.instance.database;
       
-      for (var key in wordRecordKeys) {
-        await _prefs!.remove(key);
-      }
-      print('已清除 ${wordRecordKeys.length} 条单词历史记录');
-
-      // 2. 清除学习会话中该词库的记录
-      final sessionKeys = _prefs!.getKeys()
-          .where((key) => key.startsWith(_keyPrefix))
-          .toList();
+      // 1. 清除学习记录
+      final deletedRecords = await db.delete(
+        'study_records',
+        where: 'wordbook_id = ?',
+        whereArgs: [wordbookId],
+      );
+      print('已清除 $deletedRecords 条学习记录');
       
-      for (var sessionKey in sessionKeys) {
-        try {
-          final jsonString = _prefs!.getString(sessionKey);
-          if (jsonString == null || jsonString.isEmpty) continue;
-
-          final json = jsonDecode(jsonString) as Map<String, dynamic>;
-          final records = json['records'] as List<dynamic>? ?? [];
-          
-          // 过滤掉该词库的记录
-          final filteredRecords = records
-              .where((r) {
-                final record = r as Map<String, dynamic>;
-                return record['wordbook_id'] != wordbookId;
-              })
-              .toList();
-          
-          // 如果有变化，更新会话
-          if (filteredRecords.length != records.length) {
-            json['records'] = filteredRecords;
-            await _prefs!.setString(sessionKey, jsonEncode(json));
-          }
-        } catch (e) {
-          print('处理学习会话错误: $sessionKey, $e');
-        }
-      }
-      print('已清除学习会话中该词库的记录');
-
-      // 3. 清除每日完成状态
-      final completionKeys = _prefs!.getKeys()
-          .where((key) => key.startsWith('$_dailyCompletionPrefix') && key.contains('_$wordbookId'))
-          .toList();
+      // 2. 清除每日完成状态
+      final deletedCompletion = await db.delete(
+        'daily_completion',
+        where: 'wordbook_id = ?',
+        whereArgs: [wordbookId],
+      );
+      print('已清除 $deletedCompletion 条每日完成状态记录');
       
-      for (var key in completionKeys) {
-        await _prefs!.remove(key);
-      }
-      print('已清除 ${completionKeys.length} 条每日完成状态记录');
-
-      // 4. 清除已记住单词总数的缓存
+      // 3. 清除已记住单词总数的缓存
       invalidateRememberedWordsCache();
-
+      
       notifyListeners();
       print('词库 $wordbookId 已重置');
     } catch (e) {
@@ -1194,4 +1196,3 @@ class StudyRecordService extends ChangeNotifier {
     }
   }
 }
-

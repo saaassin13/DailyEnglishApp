@@ -327,29 +327,42 @@ class _StudyDetailScreenState extends State<StudyDetailScreen> with WidgetsBindi
           ),
           const SizedBox(height: 8),
           Center(
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
+            child: Wrap(
+              alignment: WrapAlignment.center,
+              spacing: 12,
+              runSpacing: 8,
               children: [
-                _buildAccentChip('美'),
-                const SizedBox(width: 8),
-                Text(
-                  usPhone == null || usPhone.isEmpty ? '[-]' : '[$usPhone]',
-                  style: const TextStyle(fontSize: 16, color: Colors.black87),
+                // 美式音标组
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _buildAccentChip('美'),
+                    const SizedBox(width: 8),
+                    Text(
+                      usPhone == null || usPhone.isEmpty ? '[-]' : '[$usPhone]',
+                      style: const TextStyle(fontSize: 16, color: Colors.black87),
+                    ),
+                    _buildSpeakerButton(
+                      tooltip: '美式发音',
+                      onTap: () => _onUsPronunciationTap(word.word),
+                    ),
+                  ],
                 ),
-                _buildSpeakerButton(
-                  tooltip: '美式发音',
-                  onTap: () => _onUsPronunciationTap(word.word),
-                ),
-                const SizedBox(width: 12),
-                _buildAccentChip('英'),
-                const SizedBox(width: 8),
-                Text(
-                  ukPhone == null || ukPhone.isEmpty ? '[-]' : '[$ukPhone]',
-                  style: const TextStyle(fontSize: 16, color: Colors.black87),
-                ),
-                _buildSpeakerButton(
-                  tooltip: '英式发音',
-                  onTap: () => _onUkPronunciationTap(word.word),
+                // 英式音标组
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _buildAccentChip('英'),
+                    const SizedBox(width: 8),
+                    Text(
+                      ukPhone == null || ukPhone.isEmpty ? '[-]' : '[$ukPhone]',
+                      style: const TextStyle(fontSize: 16, color: Colors.black87),
+                    ),
+                    _buildSpeakerButton(
+                      tooltip: '英式发音',
+                      onTap: () => _onUkPronunciationTap(word.word),
+                    ),
+                  ],
                 ),
               ],
             ),
