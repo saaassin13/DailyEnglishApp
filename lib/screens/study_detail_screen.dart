@@ -309,6 +309,8 @@ class _StudyDetailScreenState extends State<StudyDetailScreen> with WidgetsBindi
     return GestureDetector(
       onTap: () {
         if (!_showTranslation) {
+          // 隐藏翻译时：先发音再显示翻译
+          _onUsPronunciationTap(word.word);
           setState(() => _showTranslation = true);
         }
       },
@@ -368,7 +370,7 @@ class _StudyDetailScreenState extends State<StudyDetailScreen> with WidgetsBindi
             ),
           ),
           const SizedBox(height: 12),
-          _buildTranslationToggle(),
+          _buildTranslationToggle(word.word),
           const SizedBox(height: 12),
           if (!_showTranslation) _buildRecallHint(),
           if (_showTranslation) ...[
@@ -400,7 +402,7 @@ class _StudyDetailScreenState extends State<StudyDetailScreen> with WidgetsBindi
     );
   }
 
-  Widget _buildTranslationToggle() {
+  Widget _buildTranslationToggle(String currentWord) {
     return Row(
       children: [
         Expanded(
@@ -413,7 +415,16 @@ class _StudyDetailScreenState extends State<StudyDetailScreen> with WidgetsBindi
           ),
         ),
         TextButton(
-          onPressed: () => setState(() => _showTranslation = !_showTranslation),
+          onPressed: () {
+            if (_showTranslation) {
+              // 已显示翻译时：点击按钮隐藏翻译
+              setState(() => _showTranslation = false);
+            } else {
+              // 隐藏翻译时：先发音再显示翻译
+              _onUsPronunciationTap(currentWord);
+              setState(() => _showTranslation = true);
+            }
+          },
           child: Text(_showTranslation ? '隐藏翻译' : '翻译'),
         ),
       ],
